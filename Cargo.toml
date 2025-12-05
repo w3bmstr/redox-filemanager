@@ -6,3 +6,9 @@ edition = "2024"
 [dependencies]
 chrono = "0.4.42"
 eframe = "0.27"   # eframe is the framework around egui
+filetime = "0.2"
+blake3 = "1.5"
+sha2 = "0.10"
+rand = "0.8"
+
+

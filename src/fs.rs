@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::time::UNIX_EPOCH;
+use chrono::{DateTime, Local};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::fs::MetadataExt;
@@ -36,17 +37,18 @@ pub fn list_files() {
                     let file_type = if metadata.is_dir() { "Directory" } else { "File" };
                     let size = metadata.len();
                     let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+                    let modified_str = DateTime::<Local>::from(modified).format("%Y-%m-%d %H:%M:%S").to_string();
                     let readonly = metadata.permissions().readonly();
 
                     if is_hidden {
                         println!(
-                            "{} (hidden) | {} | {} bytes | modified {:?} | readonly: {}",
-                            file_name_str, file_type, size, modified, readonly
+                            "{} (hidden) | {} | {} bytes | modified {} | readonly: {}",
+                            file_name_str, file_type, size, modified_str, readonly
                         );
                     } else {
                         println!(
-                            "{} | {} | {} bytes | modified {:?} | readonly: {}",
-                            file_name_str, file_type, size, modified, readonly
+                            "{} | {} | {} bytes | modified {} | readonly: {}",
+                            file_name_str, file_type, size, modified_str, readonly
                         );
                     }
                 }
@@ -75,6 +77,7 @@ pub fn search_files() {
                         let file_type = if metadata.is_dir() { "Directory" } else { "File" };
                         let size = metadata.len();
                         let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+                        let modified_str = DateTime::<Local>::from(modified).format("%Y-%m-%d %H:%M:%S").to_string();
                         let readonly = metadata.permissions().readonly();
 
                         // Hidden detection
@@ -89,13 +92,13 @@ pub fn search_files() {
 
                         if is_hidden {
                             println!(
-                                "{} (hidden) | {} | {} bytes | modified {:?} | readonly: {}",
-                                file_name_str, file_type, size, modified, readonly
+                                "{} (hidden) | {} | {} bytes | modified {} | readonly: {}",
+                                file_name_str, file_type, size, modified_str, readonly
                             );
                         } else {
                             println!(
-                                "{} | {} | {} bytes | modified {:?} | readonly: {}",
-                                file_name_str, file_type, size, modified, readonly
+                                "{} | {} | {} bytes | modified {} | readonly: {}",
+                                file_name_str, file_type, size, modified_str, readonly
                             );
                         }
                     }

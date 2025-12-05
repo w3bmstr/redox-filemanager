@@ -1,0 +1,835 @@
+use eframe::egui;
+use std::fs;
+use std::path::Path;
+use std::time::SystemTime;
+use chrono::{DateTime, Local};
+
+#[cfg(target_os = "windows")]
+use std::os::windows::fs::MetadataExt;
+
+pub fn run_gui() -> eframe::Result<()> {
+    let options = eframe::NativeOptions::default();
+    eframe::run_native(
+        "Redox File Manager",
+        options,
+        Box::new(|_cc| Box::new(FileManagerApp::default())),
+    )
+}
+
+#[derive(Clone)]
+struct FileEntry {
+    display: String,
+    path: String,
+    size: u64,
+    modified: String,
+    is_dir: bool,
+    readonly: bool,
+    hidden: bool,
+}
+
+struct FileManagerApp {
+    files: Vec<FileEntry>,
+    current_dir: String,
+    selected: Option<FileEntry>,
+    rename_input: String,
+    new_name_input: String,
+    move_input: String,
+    copy_input: String,
+    search_input: String,
+    batch_input: String,
+    batch_dest_input: String,
+    batch_rename_input: String,
+    status: String,
+    status_is_error: bool,
+    sort_mode: SortMode,
+    // Confirmation / pending operations
+    confirm_delete: bool,
+    confirm_target: String,
+    confirm_is_dir: bool,
+    pending_batch: Vec<String>,
+    // Batch copy confirmation
+    confirm_copy: bool,
+    confirm_copy_dest: String,
+    // Batch copy options
+    batch_create_dest: bool,
+    batch_overwrite_mode: OverwriteMode,
+    batch_preserve_timestamps: bool,
+    // progress tracking
+    batch_progress: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy)]
+enum SortMode {
+    Name,
+    Size,
+    Date,
+}
+
+impl Default for FileManagerApp {
+    fn default() -> Self {
+        let dir = ".".to_string();
+        let files = read_files(&dir);
+        Self {
+            files,
+            current_dir: dir,
+            selected: None,
+            rename_input: String::new(),
+            new_name_input: String::new(),
+            move_input: String::new(),
+            copy_input: String::new(),
+            search_input: String::new(),
+            batch_input: String::new(),
+            batch_dest_input: String::new(),
+            batch_rename_input: String::new(),
+            status: String::new(),
+            status_is_error: false,
+            sort_mode: SortMode::Name,
+            confirm_delete: false,
+            confirm_target: String::new(),
+            confirm_is_dir: false,
+            pending_batch: Vec::new(),
+            confirm_copy: false,
+            confirm_copy_dest: String::new(),
+            batch_create_dest: false,
+            batch_overwrite_mode: OverwriteMode::Overwrite,
+            batch_preserve_timestamps: false,
+            batch_progress: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OverwriteMode {
+    Overwrite,
+    Skip,
+}
+
+impl eframe::App for FileManagerApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keyboard shortcuts & text events handling
+        // - 'y' or Enter => confirm (Yes)
+        // - 'n' or Escape => cancel (No)
+        // - Delete => request delete for selected
+        // - F5 => refresh
+        let mut confirm_action: Option<bool> = None;
+        ctx.input(|input| {
+            for ev in &input.events {
+                match ev {
+                    egui::Event::Text(text) => {
+                        if text.eq_ignore_ascii_case("y") {
+                            confirm_action = Some(true);
+                        } else if text.eq_ignore_ascii_case("n") {
+                            confirm_action = Some(false);
+                        }
+                    }
+                    egui::Event::Key { key, pressed, .. } => {
+                        if *pressed {
+                            use egui::Key;
+                            if *key == Key::Delete {
+                                if let Some(sel) = &self.selected {
+                                    self.confirm_delete = true;
+                                    self.confirm_target = sel.path.clone();
+                                    self.confirm_is_dir = sel.is_dir;
+                                }
+                            } else if *key == Key::F5 {
+                                self.files = read_files(&self.current_dir);
+                                self.status = "Refreshed file list".to_string();
+                                self.status_is_error = false;
+                            } else if *key == Key::Escape {
+                                if self.confirm_delete {
+                                    self.confirm_delete = false;
+                                    self.confirm_target.clear();
+                                    self.pending_batch.clear();
+                                }
+                            } else if *key == Key::Enter {
+                                confirm_action = Some(true);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading(format!("Directory: {}", self.current_dir));
+
+            // Change directory input (parity with CLI)
+            ui.horizontal(|ui| {
+                ui.label("Change dir:");
+                ui.text_edit_singleline(&mut self.current_dir);
+                if ui.button("Change").clicked() {
+                    self.files = read_files(&self.current_dir);
+                    self.selected = None;
+                    self.status = format!("Changed directory to {}", self.current_dir);
+                    self.status_is_error = false;
+                }
+            });
+
+            // Sorting options
+            ui.horizontal(|ui| {
+                ui.label("Sort by:");
+                if ui.button("Name").clicked() {
+                    self.sort_mode = SortMode::Name;
+                    sort_files(&mut self.files, self.sort_mode);
+                }
+                if ui.button("Size").clicked() {
+                    self.sort_mode = SortMode::Size;
+                    sort_files(&mut self.files, self.sort_mode);
+                }
+                if ui.button("Date").clicked() {
+                    self.sort_mode = SortMode::Date;
+                    sort_files(&mut self.files, self.sort_mode);
+                }
+            });
+
+            ui.separator();
+
+            // Search bar
+            ui.horizontal(|ui| {
+                ui.label("Search:");
+                ui.text_edit_singleline(&mut self.search_input);
+                if ui.button("Go").clicked() {
+                    let query = self.search_input.to_lowercase();
+                    self.files = read_files(&self.current_dir)
+                        .into_iter()
+                        .filter(|f| f.display.to_lowercase().contains(&query))
+                        .collect();
+                    self.status = format!("Search results for '{}'", self.search_input);
+                    self.status_is_error = false;
+                }
+                if ui.button("Clear").clicked() {
+                    self.files = read_files(&self.current_dir);
+                    self.search_input.clear();
+                    self.status = "Search cleared".to_string();
+                    self.status_is_error = false;
+                }
+            });
+
+            ui.separator();
+
+            // File list with metadata
+            egui::Grid::new("file_grid").striped(true).show(ui, |ui| {
+                ui.label("Name");
+                ui.label("Size");
+                ui.label("Modified");
+                ui.label("Type");
+                ui.label("Readonly");
+                ui.label("Hidden");
+                ui.end_row();
+
+                // iterate over a clone so we can safely mutate self.files later
+                for entry in self.files.clone() {
+                    let selected = self.selected.as_ref().map(|s| s.path.clone()) == Some(entry.path.clone());
+                    let label = if entry.hidden {
+                        format!("{} (hidden)", entry.display)
+                    } else {
+                        entry.display.clone()
+                    };
+
+                    let response = ui.selectable_label(selected, label);
+                    ui.label(format!("{} bytes", entry.size));
+                    ui.label(&entry.modified);
+                    ui.label(if entry.is_dir { "Directory" } else { "File" });
+                    ui.label(if entry.readonly { "Yes" } else { "No" });
+                    ui.label(if entry.hidden { "Yes" } else { "No" });
+                    ui.end_row();
+
+                    // Double-click navigation into directories
+                    if response.double_clicked() && entry.is_dir {
+                        self.current_dir = entry.path.clone();
+                        self.files = read_files(&self.current_dir);
+                        self.selected = None;
+                        self.status = format!("Entered directory {}", self.current_dir);
+                        self.status_is_error = false;
+                    } else if response.clicked() {
+                        self.selected = Some(entry.clone());
+                        self.rename_input = entry.display.clone();
+                        self.status.clear();
+                    }
+                }
+            });
+
+            ui.separator();
+
+            // Actions on selected file
+            if let Some(selected_file) = self.selected.clone() {
+                ui.label(format!("Selected: {}", selected_file.display));
+
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        // request confirmation
+                        self.confirm_delete = true;
+                        self.confirm_target = selected_file.path.clone();
+                        self.confirm_is_dir = false;
+                    }
+
+                    ui.text_edit_singleline(&mut self.rename_input);
+                    if ui.button("Rename").clicked() {
+                        let new_path = Path::new(&self.current_dir).join(&self.rename_input);
+                        match fs::rename(&selected_file.path, &new_path) {
+                            Ok(_) => {
+                                self.status = format!("Renamed {} -> {}", selected_file.display, self.rename_input);
+                                self.status_is_error = false;
+                            }
+                            Err(e) => {
+                                self.status = format!("Error renaming {}: {}", selected_file.display, e);
+                                self.status_is_error = true;
+                            }
+                        }
+                        self.files = read_files(&self.current_dir);
+                        self.selected = None;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.move_input);
+                    if ui.button("Move").clicked() {
+                        match fs::rename(&selected_file.path, &self.move_input) {
+                            Ok(_) => {
+                                self.status = format!("Moved {} -> {}", selected_file.display, self.move_input);
+                                self.status_is_error = false;
+                            }
+                            Err(e) => {
+                                self.status = format!("Error moving {}: {}", selected_file.display, e);
+                                self.status_is_error = true;
+                            }
+                        }
+                        self.files = read_files(&self.current_dir);
+                        self.selected = None;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.copy_input);
+                    if ui.button("Copy").clicked() {
+                        match fs::copy(&selected_file.path, &self.copy_input) {
+                            Ok(_) => {
+                                self.status = format!("Copied {} -> {}", selected_file.display, self.copy_input);
+                                self.status_is_error = false;
+                            }
+                            Err(e) => {
+                                self.status = format!("Error copying {}: {}", selected_file.display, e);
+                                self.status_is_error = true;
+                            }
+                        }
+                        self.files = read_files(&self.current_dir);
+                    }
+                });
+            }
+
+            ui.separator();
+
+            // Create / Delete panel
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.new_name_input);
+
+                if ui.button("Create File").clicked() {
+                    match std::fs::File::create(Path::new(&self.current_dir).join(&self.new_name_input)) {
+                        Ok(_) => {
+                            self.status = format!("Created file {}", self.new_name_input);
+                            self.status_is_error = false;
+                        }
+                        Err(e) => {
+                            self.status = format!("Error creating file {}: {}", self.new_name_input, e);
+                            self.status_is_error = true;
+                        }
+                    }
+                    self.files = read_files(&self.current_dir);
+                    self.new_name_input.clear();
+                }
+
+                if ui.button("Create Directory").clicked() {
+                    match fs::create_dir(Path::new(&self.current_dir).join(&self.new_name_input)) {
+                        Ok(_) => {
+                            self.status = format!("Created directory {}", self.new_name_input);
+                            self.status_is_error = false;
+                        }
+                        Err(e) => {
+                            self.status = format!("Error creating directory {}: {}", self.new_name_input, e);
+                            self.status_is_error = true;
+                        }
+                    }
+                    self.files = read_files(&self.current_dir);
+                    self.new_name_input.clear();
+                }
+
+                if ui.button("Delete Directory").clicked() {
+                    // request confirmation for directory delete
+                    let target = Path::new(&self.current_dir).join(&self.new_name_input).to_string_lossy().to_string();
+                    self.confirm_delete = true;
+                    self.confirm_target = target;
+                    self.confirm_is_dir = true;
+                    self.new_name_input.clear();
+                }
+            });
+
+            ui.separator();
+
+            // Batch operations
+            ui.horizontal(|ui| {
+                ui.label("Batch (comma separated):");
+                ui.text_edit_singleline(&mut self.batch_input);
+
+                if ui.button("Batch Delete").clicked() {
+                    let names: Vec<String> = self.batch_input.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    if !names.is_empty() {
+                        self.pending_batch = names.clone();
+                        self.confirm_delete = true;
+                        self.confirm_is_dir = false;
+                        self.confirm_target = names.join(", ");
+                    }
+                }
+
+                // Batch Copy: supply destination in separate field
+                ui.label("Dest:");
+                ui.text_edit_singleline(&mut self.batch_dest_input);
+
+                // Options for batch copy
+                ui.checkbox(&mut self.batch_create_dest, "Create destination if missing");
+                ui.horizontal(|ui| {
+                    ui.label("If exists:");
+                    if ui.selectable_label(matches!(self.batch_overwrite_mode, OverwriteMode::Overwrite), "Overwrite").clicked() {
+                        self.batch_overwrite_mode = OverwriteMode::Overwrite;
+                    }
+                    if ui.selectable_label(matches!(self.batch_overwrite_mode, OverwriteMode::Skip), "Skip existing").clicked() {
+                        self.batch_overwrite_mode = OverwriteMode::Skip;
+                    }
+                });
+                ui.checkbox(&mut self.batch_preserve_timestamps, "Preserve timestamps");
+
+                // make button more visible and descriptive
+                if ui.button("Batch Copy (queue) — will ask confirmation").clicked() {
+                    let names: Vec<String> = self.batch_input.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    let dest = self.batch_dest_input.trim().to_string();
+                    if names.is_empty() || dest.is_empty() {
+                        self.status = "Provide sources and a destination".to_string();
+                        self.status_is_error = true;
+                    } else {
+                        // queue the batch copy and ask for confirmation
+                        self.pending_batch = names.clone();
+                        self.confirm_copy = true;
+                        self.confirm_copy_dest = dest.clone();
+                    }
+                }
+
+                // Batch Rename: provide pairs in separate field like old:new,old2:new2
+                ui.label("Rename pairs:");
+                ui.text_edit_singleline(&mut self.batch_rename_input);
+                if ui.button("Batch Rename").clicked() {
+                    let pairs: Vec<String> = self.batch_rename_input.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    if pairs.is_empty() {
+                        self.status = "Provide rename pairs like old:new".to_string();
+                        self.status_is_error = true;
+                    } else {
+                        for pair in pairs.iter() {
+                            if let Some((old, new)) = pair.split_once(':') {
+                                let src = Path::new(&self.current_dir).join(old.trim());
+                                let dst = Path::new(&self.current_dir).join(new.trim());
+                                match fs::rename(&src, &dst) {
+                                    Ok(_) => {
+                                        self.status = format!("Renamed {} -> {}", old.trim(), new.trim());
+                                        self.status_is_error = false;
+                                    }
+                                    Err(e) => {
+                                        self.status = format!("Error renaming {}: {}", old.trim(), e);
+                                        self.status_is_error = true;
+                                    }
+                                }
+                            } else {
+                                self.status = format!("Invalid pair: {}", pair);
+                                self.status_is_error = true;
+                            }
+                        }
+                        self.files = read_files(&self.current_dir);
+                        self.batch_rename_input.clear();
+                    }
+                }
+            });
+
+            // Refresh and Exit
+            ui.horizontal(|ui| {
+                if ui.button("Refresh").clicked() {
+                    self.files = read_files(&self.current_dir);
+                    self.status = "Refreshed file list".to_string();
+                    self.status_is_error = false;
+                }
+                if ui.button("Exit GUI").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+
+            ui.separator();
+
+            // Colored status bar
+            let color = if self.status_is_error {
+                egui::Color32::RED
+            } else {
+                egui::Color32::GREEN
+            };
+                        ui.colored_label(color, &self.status);
+
+            // Batch progress panel (summary, save/clear, and per-file list)
+            if !self.batch_progress.is_empty() {
+                ui.separator();
+                ui.label("Batch Progress:");
+
+                // summary counts
+                let copied_count = self
+                    .batch_progress
+                    .iter()
+                    .filter(|(_, s)| s.to_lowercase().starts_with("copied") || s.to_lowercase().contains("copied ->"))
+                    .count();
+                let skipped_count = self.batch_progress.iter().filter(|(_, s)| s.to_lowercase().contains("skipped")).count();
+                let error_count = self.batch_progress.iter().filter(|(_, s)| s.to_lowercase().contains("error")).count();
+
+                ui.horizontal(|ui| {
+                    ui.label(format!("Completed: {}  Skipped: {}  Errors: {}", copied_count, skipped_count, error_count));
+                    if ui.button("Clear Progress").clicked() {
+                        self.batch_progress.clear();
+                    }
+                    if ui.button("Save Progress").clicked() {
+                        // Save a simple CSV-like log in the current directory
+                        if let Ok(mut f) = std::fs::File::create(Path::new(&self.current_dir).join("batch_progress.log")) {
+                            use std::io::Write;
+                            for (name, status) in self.batch_progress.iter() {
+                                let _ = writeln!(f, "{},{}", name.replace(',', ";"), status);
+                            }
+                            self.status = "Saved batch_progress.log".to_string();
+                            self.status_is_error = false;
+                        } else {
+                            self.status = "Failed to save progress log".to_string();
+                            self.status_is_error = true;
+                        }
+                    }
+                });
+
+                // scrollable per-file progress list
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for (name, status) in self.batch_progress.iter() {
+                        ui.horizontal(|ui| {
+                            ui.label(name);
+                            ui.label(" - ");
+                            ui.colored_label(
+                                if status.to_lowercase().contains("error") {
+                                    egui::Color32::RED
+                                } else if status.to_lowercase().contains("skipped") {
+                                    egui::Color32::YELLOW
+                                } else {
+                                    egui::Color32::GREEN
+                                },
+                                status,
+                            );
+                        });
+                    }
+                });
+            }
+
+            // Confirmation window
+            if self.confirm_delete {
+                // allow keyboard-driven confirmation as well as button clicks
+                egui::Window::new("Confirm").collapsible(false).resizable(false).show(ctx, |ui| {
+                    ui.label("Are you sure? (y/n)");
+                    ui.label(format!("Delete: {}", self.confirm_target));
+                    ui.separator();
+
+                    // If a keyboard confirm/cancel was detected earlier this frame, act on it immediately
+                    // confirm_action is set to Some(true) for Yes, Some(false) for No
+                    if let Some(choice) = confirm_action {
+                        if choice {
+                            // Yes
+                            if self.pending_batch.is_empty() {
+                                if self.confirm_is_dir {
+                                    match fs::remove_dir_all(&self.confirm_target) {
+                                        Ok(_) => {
+                                            self.status = format!("Deleted directory {}", self.confirm_target);
+                                            self.status_is_error = false;
+                                        }
+                                        Err(e) => {
+                                            self.status = format!("Error deleting directory {}: {}", self.confirm_target, e);
+                                            self.status_is_error = true;
+                                        }
+                                    }
+                                } else {
+                                    match fs::remove_file(&self.confirm_target) {
+                                        Ok(_) => {
+                                            self.status = format!("Deleted {}", self.confirm_target);
+                                            self.status_is_error = false;
+                                        }
+                                        Err(e) => {
+                                            self.status = format!("Error deleting {}: {}", self.confirm_target, e);
+                                            self.status_is_error = true;
+                                        }
+                                    }
+                                }
+                            } else {
+                                for name in self.pending_batch.iter() {
+                                    let path = Path::new(&self.current_dir).join(name);
+                                    match fs::remove_file(&path) {
+                                        Ok(_) => {
+                                            self.status = format!("Deleted {}", name);
+                                            self.status_is_error = false;
+                                        }
+                                        Err(e) => {
+                                            self.status = format!("Error deleting {}: {}", name, e);
+                                            self.status_is_error = true;
+                                        }
+                                    }
+                                }
+                                self.pending_batch.clear();
+                            }
+
+                            self.files = read_files(&self.current_dir);
+                            self.selected = None;
+                            self.confirm_delete = false;
+                            self.confirm_target.clear();
+                        } else {
+                            // No
+                            self.confirm_delete = false;
+                            self.confirm_target.clear();
+                            self.pending_batch.clear();
+                        }
+                        return; // we've handled the confirmation this frame
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Yes").clicked() {
+                            if self.pending_batch.is_empty() {
+                                if self.confirm_is_dir {
+                                    match fs::remove_dir_all(&self.confirm_target) {
+                                        Ok(_) => {
+                                            self.status = format!("Deleted directory {}", self.confirm_target);
+                                            self.status_is_error = false;
+                                        }
+                                        Err(e) => {
+                                            self.status = format!("Error deleting directory {}: {}", self.confirm_target, e);
+                                            self.status_is_error = true;
+                                        }
+                                    }
+                                } else {
+                                    match fs::remove_file(&self.confirm_target) {
+                                        Ok(_) => {
+                                            self.status = format!("Deleted {}", self.confirm_target);
+                                            self.status_is_error = false;
+                                        }
+                                        Err(e) => {
+                                            self.status = format!("Error deleting {}: {}", self.confirm_target, e);
+                                            self.status_is_error = true;
+                                        }
+                                    }
+                                }
+                            } else {
+                                for name in self.pending_batch.iter() {
+                                    let path = Path::new(&self.current_dir).join(name);
+                                    match fs::remove_file(&path) {
+                                        Ok(_) => {
+                                            self.status = format!("Deleted {}", name);
+                                            self.status_is_error = false;
+                                        }
+                                        Err(e) => {
+                                            self.status = format!("Error deleting {}: {}", name, e);
+                                            self.status_is_error = true;
+                                        }
+                                    }
+                                }
+                                self.pending_batch.clear();
+                            }
+
+                            self.files = read_files(&self.current_dir);
+                            self.selected = None;
+                            self.confirm_delete = false;
+                            self.confirm_target.clear();
+                        }
+
+                        if ui.button("No").clicked() {
+                            self.confirm_delete = false;
+                            self.confirm_target.clear();
+                            self.pending_batch.clear();
+                        }
+                    });
+                });
+            }
+
+            // Confirmation window for batch copy
+            if self.confirm_copy {
+                egui::Window::new("Confirm Copy").collapsible(false).resizable(false).show(ctx, |ui| {
+                    ui.label("Are you sure you want to copy these files? (y/n)");
+                    ui.label(format!("Files: {}", self.pending_batch.join(", ")));
+                    ui.label(format!("Destination: {}", self.confirm_copy_dest));
+                    ui.separator();
+
+                    // If a keyboard confirm/cancel was detected earlier this frame, act on it immediately
+                    if let Some(choice) = confirm_action {
+                        if choice {
+                            // perform copies with options
+                            self.batch_progress.clear();
+                            // ensure destination directory exists if requested
+                            if self.batch_create_dest {
+                                let _ = std::fs::create_dir_all(&self.confirm_copy_dest);
+                            }
+                            for name in self.pending_batch.iter() {
+                                let src = Path::new(&self.current_dir).join(name);
+                                let filename = src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| name.clone());
+                                let dst_path = Path::new(&self.confirm_copy_dest).join(&filename);
+
+                                let mut status = String::new();
+                                // handle overwrite policy
+                                if dst_path.exists() {
+                                    match self.batch_overwrite_mode {
+                                        OverwriteMode::Overwrite => {
+                                            // proceed to copy
+                                        }
+                                        OverwriteMode::Skip => {
+                                            status = "skipped (exists)".to_string();
+                                            self.batch_progress.push((name.clone(), status));
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                match fs::copy(&src, &dst_path) {
+                                    Ok(_) => {
+                                        // preserve timestamps if requested
+                                        if self.batch_preserve_timestamps {
+                                            if let Ok(meta) = src.metadata() {
+                                                if let Ok(mtime) = meta.modified() {
+                                                    let ft = filetime::FileTime::from_system_time(mtime);
+                                                    let _ = filetime::set_file_mtime(&dst_path, ft);
+                                                }
+                                            }
+                                        }
+                                        status = format!("copied -> {}", dst_path.to_string_lossy());
+                                        self.status_is_error = false;
+                                    }
+                                    Err(e) => {
+                                        status = format!("error: {}", e);
+                                        self.status_is_error = true;
+                                    }
+                                }
+                                self.batch_progress.push((name.clone(), status));
+                            }
+                            self.pending_batch.clear();
+                            self.confirm_copy = false;
+                            self.confirm_copy_dest.clear();
+                            self.files = read_files(&self.current_dir);
+                            // leave batch_progress visible in UI (cleared on next batch or refresh)
+                        } else {
+                            self.pending_batch.clear();
+                            self.confirm_copy = false;
+                            self.confirm_copy_dest.clear();
+                        }
+                        return;
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Yes").clicked() {
+                            // fallback: behave like keyboard-confirmed path above
+                            self.batch_progress.clear();
+                            if self.batch_create_dest {
+                                let _ = std::fs::create_dir_all(&self.confirm_copy_dest);
+                            }
+                            for name in self.pending_batch.iter() {
+                                let src = Path::new(&self.current_dir).join(name);
+                                let filename = src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| name.clone());
+                                let dst_path = Path::new(&self.confirm_copy_dest).join(&filename);
+
+                                let mut status = String::new();
+                                if dst_path.exists() {
+                                    match self.batch_overwrite_mode {
+                                        OverwriteMode::Overwrite => {}
+                                        OverwriteMode::Skip => {
+                                            status = "skipped (exists)".to_string();
+                                            self.batch_progress.push((name.clone(), status));
+                                            continue;
+                                        }
+                                    }
+                                }
+
+                                match fs::copy(&src, &dst_path) {
+                                    Ok(_) => {
+                                        if self.batch_preserve_timestamps {
+                                            if let Ok(meta) = src.metadata() {
+                                                if let Ok(mtime) = meta.modified() {
+                                                    let ft = filetime::FileTime::from_system_time(mtime);
+                                                    let _ = filetime::set_file_mtime(&dst_path, ft);
+                                                }
+                                            }
+                                        }
+                                        status = format!("copied -> {}", dst_path.to_string_lossy());
+                                        self.status_is_error = false;
+                                    }
+                                    Err(e) => {
+                                        status = format!("error: {}", e);
+                                        self.status_is_error = true;
+                                    }
+                                }
+                                self.batch_progress.push((name.clone(), status));
+                            }
+                            self.pending_batch.clear();
+                            self.confirm_copy = false;
+                            self.confirm_copy_dest.clear();
+                            self.files = read_files(&self.current_dir);
+                        }
+
+                        if ui.button("No").clicked() {
+                            self.pending_batch.clear();
+                            self.confirm_copy = false;
+                            self.confirm_copy_dest.clear();
+                        }
+                    });
+                });
+            }
+        });
+    }
+}
+
+fn read_files(dir: &str) -> Vec<FileEntry> {
+    let mut files = Vec::new();
+            if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            let size = metadata.len();
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let modified_str = DateTime::<Local>::from(modified).format("%Y-%m-%d %H:%M:%S").to_string();
+
+            let is_dir = metadata.is_dir();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let readonly = metadata.permissions().readonly();
+
+            let mut hidden = name.starts_with('.');
+            #[cfg(target_os = "windows")]
+            {
+                const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0 {
+                    hidden = true;
+                }
+            }
+
+            files.push(FileEntry {
+                display: name,
+                path: path.to_string_lossy().to_string(),
+                size,
+                modified: modified_str,
+                is_dir,
+                readonly,
+                hidden,
+            });
+        }
+    }
+    sort_files(&mut files, SortMode::Name);
+    files
+}
+
+fn sort_files(files: &mut Vec<FileEntry>, mode: SortMode) {
+    match mode {
+        SortMode::Name => files.sort_by(|a, b| a.display.to_lowercase().cmp(&b.display.to_lowercase())),
+        SortMode::Size => files.sort_by(|a, b| a.size.cmp(&b.size)),
+        SortMode::Date => files.sort_by(|a, b| a.modified.cmp(&b.modified)),
+    }
+}
+

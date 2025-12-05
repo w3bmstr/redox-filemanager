@@ -5,8 +5,8 @@ mod fs;
 mod actions;
 mod error;
 mod navigation;
-mod gui; // 👈 add this
-
+mod gui; // 👈 GUI module
+mod archive;
 
 fn main() {
     println!("Redox File Manager starting...");
@@ -28,8 +28,16 @@ fn main() {
         println!("12. Create file");
         println!("13. Create directory");
         println!("14. Delete directory");
-        println!("15. Launch GUI");   // 👈 new option
-        println!("16. Exit");
+        println!("15. Launch GUI");
+        println!("17. Archive: List contents");
+        println!("18. Archive: Extract");
+        println!("19. Archive: Create");
+        println!("20. Calculate file hash");
+        println!("21. Find duplicate files");
+        println!("22. Secure delete file");
+        println!("23. Split file");
+        println!("24. Join file chunks");
+        println!("25. Exit");
 
         let mut choice = String::new();
         io::stdin().read_line(&mut choice).unwrap();
@@ -38,7 +46,7 @@ fn main() {
         match choice {
             "1" => fs::list_files(),
             "2" => actions::copy_file(),
-            "3" => actions::delete_file(),
+            "3" => actions::delete_file(),        // 👈 now includes confirmation
             "4" => println!("Centralized error handling is active."),
             "5" => navigation::change_directory(),
             "6" => fs::search_files(),
@@ -49,7 +57,7 @@ fn main() {
             "11" => actions::batch_rename(),
             "12" => actions::create_file(),
             "13" => actions::create_directory(),
-            "14" => actions::delete_directory(),
+            "14" => actions::delete_directory(),  // 👈 now includes confirmation
             "15" => {
                 if let Err(e) = gui::run_gui() {
                     println!("Failed to launch GUI: {}", e);
@@ -63,3 +71,6 @@ fn main() {
         }
     }
 }
+
+
+
