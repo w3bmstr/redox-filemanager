@@ -1,12 +1,12 @@
 use std::io;
 
-mod ui;
-mod fs;
 mod actions;
-mod error;
-mod navigation;
-mod gui; // 👈 GUI module
 mod archive;
+mod error;
+mod fs;
+mod gui; // 👈 GUI module
+mod navigation;
+mod ui;
 
 fn main() {
     println!("Redox File Manager starting...");
@@ -46,7 +46,7 @@ fn main() {
         match choice {
             "1" => fs::list_files(),
             "2" => actions::copy_file(),
-            "3" => actions::delete_file(),        // 👈 now includes confirmation
+            "3" => actions::delete_file(), // 👈 now includes confirmation
             "4" => println!("Centralized error handling is active."),
             "5" => navigation::change_directory(),
             "6" => fs::search_files(),
@@ -57,13 +57,21 @@ fn main() {
             "11" => actions::batch_rename(),
             "12" => actions::create_file(),
             "13" => actions::create_directory(),
-            "14" => actions::delete_directory(),  // 👈 now includes confirmation
+            "14" => actions::delete_directory(), // 👈 now includes confirmation
             "15" => {
                 if let Err(e) = gui::run_gui() {
                     println!("Failed to launch GUI: {}", e);
                 }
             }
-            "16" => {
+            "17" => actions::archive_list_cli(),
+            "18" => actions::archive_extract_cli(),
+            "19" => actions::archive_create_cli(),
+            "20" => actions::calculate_hash(),
+            "21" => actions::find_duplicates(),
+            "22" => actions::secure_delete(),
+            "23" => actions::split_file(),
+            "24" => actions::join_files(),
+            "25" => {
                 println!("Exiting File Manager...");
                 break;
             }
@@ -71,6 +79,3 @@ fn main() {
         }
     }
 }
-
-
-

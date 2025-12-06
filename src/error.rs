@@ -22,7 +22,10 @@ pub fn handle_error(err: io::Error, context: &str) {
             println!("Error: Failed to write data to {}.", context);
         }
         io::ErrorKind::Interrupted => {
-            println!("Error: Operation interrupted while working with {}.", context);
+            println!(
+                "Error: Operation interrupted while working with {}.",
+                context
+            );
         }
         _ => {
             println!("Unexpected error with {}: {}", context, err);

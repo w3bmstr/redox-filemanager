@@ -11,7 +11,9 @@ pub fn change_directory() {
     match env::set_current_dir(dir) {
         Ok(_) => println!("Changed directory to {}", dir),
         Err(e) if e.kind() == io::ErrorKind::NotFound => println!("Error: Directory not found."),
-        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => println!("Error: Permission denied."),
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            println!("Error: Permission denied.")
+        }
         Err(e) => println!("Unexpected error: {}", e),
     }
 }
